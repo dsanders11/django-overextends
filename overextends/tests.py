@@ -11,7 +11,21 @@ from django.template.loader import get_template
 from django.test import TestCase
 
 
-TEST_TEMPLATE = """
+INCLUDED_TEMPLATE_TEXT = "Included template"
+
+MAIN_TEST_TEMPLATE = """
+
+{# avast ye mateys #}
+%(extends_string)s
+{%% block main %%}
+%(super_string)s
+%(test_string)s
+{%% include "%(include_string)s" %%}
+{%% endblock %%}
+
+"""
+
+INCLUDE_TEST_TEMPLATE = """
 
 {# avast ye mateys #}
 %(extends_string)s
@@ -44,10 +58,11 @@ class Tests(TestCase):
 
         # Add the test apps to INSTALLED_APPS.
         self.unique_id = str(uuid4()).replace("-", "")
+        self.unique_id2 = str(uuid4()).replace("-", "")
         self.test_apps = ["app%s%s" % (i, self.unique_id) for i in range(10)]
 
         # Create the app directories with the test template.
-        for test_app in self.test_apps:
+        for idx, test_app in enumerate(self.test_apps):
             app_dir = os.path.join(self.root, test_app)
             os.mkdir(app_dir)
             app_templates = os.path.join(app_dir, "templates")
@@ -55,7 +70,12 @@ class Tests(TestCase):
             with open(os.path.join(app_dir, "__init__.py"), "w") as f:
                 f.write("")
             extends = test_app != self.test_apps[-1]
-            self._create_template(app_templates, test_app, extends)
+
+            # Only create included template for the last app so that there's
+            # fewer included templates than main templates, which would trigger
+            # a case where pruned paths would cause a TemplateNotFound error if
+            # the paths were not reset after each successful root template is found
+            self._create_template(app_templates, test_app, extends, not extends)
 
         # Add the test template to the project, and store a flag
         # indicating whether or not the project templates directory
@@ -65,24 +85,42 @@ class Tests(TestCase):
         self.project_templates_exist = os.path.exists(project_templates)
         if not self.project_templates_exist:
             os.mkdir(project_templates)
-        self._create_template(project_templates, "project", True)
+        self._create_template(project_templates, "project", True, True)
 
-    def _create_template(self, template_dir, test_string, extends):
+    def _create_template(self, template_dir, test_string, extends, include):
         """
         Creates the test template in the given template directory, with
-        the test string injected that we'll use for the real test.
+        the test string injected that we'll use for the real test. Will also
+        create the template included by the main test template if include is true
         """
+        if include:
+            with open(os.path.join(template_dir, self.unique_id2), "w") as f:
+                template_vars = {
+                    "extends_string": "",
+                    "super_string": "",
+                    "test_string": "",
+                }
+                if extends:
+                    extends_string = "{%% overextends \"%s\" %%}" % self.unique_id2
+                    template_vars["extends_string"] = extends_string
+                    template_vars["super_string"] = "{{ block.super }}"
+                else:
+                    # Only add the text to the root template
+                    template_vars["test_string"] = INCLUDED_TEMPLATE_TEXT
+                f.write((INCLUDE_TEST_TEMPLATE % template_vars).strip())
+
         with open(os.path.join(template_dir, self.unique_id), "w") as f:
             template_vars = {
                 "test_string": test_string,
                 "extends_string": "",
                 "super_string": "",
+                "include_string": self.unique_id2,
             }
             if extends:
                 extends_string = "{%% overextends \"%s\" %%}" % self.unique_id
                 template_vars["extends_string"] = extends_string
                 template_vars["super_string"] = "{{ block.super }}"
-            f.write((TEST_TEMPLATE % template_vars).strip())
+            f.write((MAIN_TEST_TEMPLATE % template_vars).strip())
 
     def test_overextends(self):
         """
@@ -91,13 +129,23 @@ class Tests(TestCase):
         with self.modify_settings(INSTALLED_APPS={
                     'prepend': self.test_apps
                 }):
-            html = get_template(self.unique_id).render(Context())
+            html = get_template(self.unique_id).render({})
             previous = ""
             for test_string in ["project"] + self.test_apps:
                 self.assertTrue(test_string in html)
                 if previous:
                     self.assertTrue(html.index(test_string) < html.index(previous))
                 previous = test_string
+
+            # We expect the included template to be included for every app and also
+            # the in the project template, and only the root include template has
+            # the INCLUDED_TEMPLATE_TEXT string in it so we expect as many occurences
+            # as there are includes of the root. This check is done instead of
+            # expecting a TemplateNotFound exception because they seem to not be
+            # thrown when using the render() method directly on a template, oddly
+            actual_include_count = html.count(INCLUDED_TEMPLATE_TEXT)
+            expected_include_count = len(self.test_apps) + 1
+            self.assertEqual(actual_include_count, expected_include_count)
 
     def tearDown(self):
         """
@@ -107,5 +155,6 @@ class Tests(TestCase):
             rmtree(os.path.join(self.root, test_app))
         if self.project_templates_exist:
             os.remove(os.path.join(self.root, "templates", self.unique_id))
+            os.remove(os.path.join(self.root, "templates", self.unique_id2))
         else:
             rmtree(os.path.join(self.root, "templates"))
