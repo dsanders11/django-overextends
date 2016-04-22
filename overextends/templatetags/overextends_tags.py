@@ -3,10 +3,13 @@ import os
 
 from django import template
 from django.template import Template, TemplateSyntaxError, TemplateDoesNotExist
+from django.template.base import TextNode
 from django.template.loader_tags import ExtendsNode
 
 
 register = template.Library()
+
+OVEREXTENDS_CONTEXT_KEY = "OVEREXTENDS_DIRS"
 
 
 class OverExtendsNode(ExtendsNode):
@@ -72,7 +75,7 @@ class OverExtendsNode(ExtendsNode):
         # names to the lists of template directories available to
         # search for that template. Each time a template is loaded, its
         # origin directory is removed from its directories list.
-        context_name = "OVEREXTENDS_DIRS"
+        context_name = OVEREXTENDS_CONTEXT_KEY
         if context_name not in context:
             context[context_name] = {}
         if name not in context[context_name]:
@@ -126,9 +129,25 @@ class OverExtendsNode(ExtendsNode):
             return parent
         template = self.find_template(parent, context)
         for node in template.nodelist:
-            if (isinstance(node, ExtendsNode) and
-                    node.parent_name.resolve(context) == parent):
-                return self.find_template(parent, context, peeking=True)
+            # The ExtendsNode has to be the first non-text node.
+            if not isinstance(node, TextNode):
+                if (isinstance(node, ExtendsNode) and
+                        node.parent_name.resolve(context) == parent):
+                    template = self.find_template(parent, context, peeking=True)
+                break
+        # Once a root template has been found the OVEREXTENDS_CONTEXT_KEY needs
+        # to be cleared for this parent name in case that name is used multiple
+        # times in this template, e.g. it is an included fragment
+        for node in template.nodelist:
+            # The ExtendsNode has to be the first non-text node.
+            if not isinstance(node, TextNode):
+                if not isinstance(node, ExtendsNode):
+                    # Root template found, so clear overextends context
+                    try:
+                        del context[OVEREXTENDS_CONTEXT_KEY][parent]
+                    except KeyError as e:
+                        pass
+                break
         return template
 
 
